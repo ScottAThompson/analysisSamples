@@ -1,0 +1,82 @@
+---
+title: "Count Data Analysis Example"
+author: "Scott Thompson"
+date: "26/03/2022"
+output: 
+  pdf_document:
+    citation_package: natbib
+bibliography: frogs.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+* An analysis of over dispersed count data
+* Uses frog road kill data described in chapter 16 of \cite{zuur2009mixed}
+* association analysis
+
+# Preliminaries
+
+Start by loading libraries and data. Libraries first - we are using the tidyverse packages instead of the core R used in \cite{zuur2009mixed}.
+
+```{r loadLibraries, message=FALSE, warning=FALSE}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(here)
+```
+
+Next we load in the data, it is not available directly from the git repository and must be grabbed separately from \url{http://highstat.com/index.php/mixed-effects-models-and-extensions-in-ecology-with-r}. Copyright status is unclear so it is excluded from repository. 
+
+```{r loadData, message=FALSE, warning=FALSE, results=FALSE}
+# specify the column types to minimise memory usage
+# use column names to avoid creating column order dependency
+ct <- cols(Sector = col_integer(), X = col_integer(), Y = col_integer(), 
+           BufoCalamita = col_integer(), TOT.N = col_integer(), 
+           S.RICH = col_integer(), 
+           .default = col_double())
+df <- read_tsv(here("data/RoadKills.txt"), col_types = ct) %>% 
+  mutate(N.PATCH = as.integer(N.PATCH)) # if col_type is used will import as NA
+assertthat::assert_that(nrow(df) == 52 && ncol(df) == 23, msg="Data set does match expect dimension 52 x 23")
+rm(ct)
+```
+# Cleaning
+
+The data has already been cleaned by the original authors. However the column names require more memory / cognitive capacity than I am willing to allocate, so we are adding a mapping to change the authors names to something I find easier to work with and at the same time creating a more descriptive text mapping that can be used for graphics. 
+
+```{r makeMap, results=FALSE}
+nameMap <- tibble(original = c("Sector", "X", "Y", "BufoCalamita", "TOT.N", "S.RICH",    "OPEN.L", "OLIVE", "MONT.S", "MONT", "POLIC", "SHRUB", "URBAN", "WAT.RES", "L.WAT.C", "L.D.ROAD", "L.P.ROAD", "D.WAT.RES", "D.WAT.COUR", "D.PARK", "N.PATCH", "P.EDGE",  "L.SDI"), 
+                  feature = c('sector', 'x', 'y', 'bufoCalamita', 'count', 'sRich', 'openLands', 'oliveGroves', 'motadoShrubs', 'motadoNoShrubs', 'policulture', 'shrubs', 'urban', 'reservoirs', 'lenWaterCourses', 'lenDirtyRoad', 'lenPavedRoad', 'distReservoirs', 'distWaterCourses', 'distNationalPark', 'nHabitatPatches', 'edgesPerimeter', 'diversityIdx'), 
+                  description = c('Sector', 'X coordinate', 'Y coordinate', 'BufoCalamita', 'Count of frog roadkill', 'S.Rich', 'Open Lands (ha)', 'Olive Groves (ha)', 'Motado with shrubs (ha)', 'Motado without shrubs (ha)', 'Policulture (ha)', 'Shrubs (ha)', 'Urban (ha)', 'Water reservoirs (ha)', 'Lenght of Water Courses (km)', 'Length of Dirty Road (km)', 'Len of Paved Road (km)', 'Distance to Water Reservoirs', 'Distance to Water Courses', 'Dist to National Park (m)', 'Number of Habitat Patches', 'Edges Perimeter', 'Landscape Shannon diversity index'))
+```
+
+We now change the column names to my preferred - this technique has the benefit of crashing if the column names in the data file do not match my pre-existing notation as encoded in the map.
+
+```{r changeNames, results=FALSE}
+# a name in the data file not in the map will not be found giving a shorter vector than required creating an error
+names(df) <- nameMap %>% filter(names(df) %in% original) %>% pull(feature)
+```
+# Data description
+
+There are 23 columns but only 17 features. Lets deal with the other columns. Sector is an identifier column for the sector along the road where the data is collected. X and Y refer to x, y coordinates for the midpoint of the sector and provide point spatial data for the data set - it should be noted that the counts are really for an area not a point. BufoCalamita is not described in the text but may be the count of the Natterjack toad (Bufo calamita) and TOT.N is the total number of road kill frogs counted for the sector. S.RICH is not known and was excluded in the original analysis; it is excluded here also.
+
+The other columns are features and relate to the land around the road segment.
+
+# Analysis
+
+## Exploration
+
+```{r bivarPlots}
+# create a plot of each features against the target (count)
+dontPlot <- c('sector', 'x', 'y', 'bufoCalamita', 'count', 'sRich')
+plotFeatures <- setdiff(names(df), dontPlot)
+plotList <- lapply(plotFeatures, function(x, d) { 
+                     ggplot(d, aes(x=x, y="count")) + 
+                       geom_point() + 
+                       labs(x = x, y = "Count") +
+                       theme_minimal() }, df)
+
+```
+

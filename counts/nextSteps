@@ -1,0 +1,8 @@
+# Next steps
+* basic mean model $Y \sim \mu + \epsilon$
+* pairs plot for correlations
+* boxcox / yeo-johnson transformations
+* spatial plot
+* ggplots of each variable
+
+
