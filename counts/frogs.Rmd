@@ -23,6 +23,7 @@ Start by loading libraries and data. Libraries first - we are using the tidyvers
 ```{r loadLibraries, message=FALSE, warning=FALSE}
 library(readr)
 library(dplyr)
+library(stringr)
 library(ggplot2)
 library(gridExtra)
 library(here)
@@ -64,19 +65,98 @@ There are 23 columns but only 17 features. Lets deal with the other columns. Sec
 
 The other columns are features and relate to the land around the road segment.
 
-# Analysis
+# Exploration
 
-## Exploration
+```{r univarPlots, message=FALSE, warning=FALSE}
+# create a plot of each feature
+dontPlot <- c('sector', 'x', 'y', 'bufoCalamita', 'sRich')
+plotFeatures <- setdiff(names(df), dontPlot)
+plotList <- lapply(plotFeatures, function(x, d) { 
+                     ggplot(d, aes_string(x=x)) + 
+                       geom_histogram() + 
+                       labs(x = x) +
+                       theme_minimal() }, df)
+marrangeGrob(plotList, nrow=3, ncol=3)
+```
 
-```{r bivarPlots}
+From univariate plots, there are features with right skewness, urban, policulture, reservoirs, shrubs, motadoShrubs, oliveGroves, lenPavedRoad and nHabitatPatches. Transformation may be appropriate, log and square root transformations are common but these features include zero values precluding logarithms. 
+
+Transform these variables using square root. 
+
+```{r xform}
+df <- df %>% mutate(urban = sqrt(urban), 
+                    policulture = sqrt(policulture),
+                    reservoirs = sqrt(reservoirs), 
+                    shrubs = sqrt(shrubs),
+                    motadoShrubs = sqrt(motadoShrubs), 
+                    oliveGroves = sqrt(oliveGroves), 
+                    lenPavedRoad  = sqrt(lenPavedRoad), 
+                    nHabitatPatches = sqrt(nHabitatPatches))
+```
+
+Considering bi-variate plots of each feature against the frog counts, it is apparent that a linear model will be too restrictive. Generalised additive models include the ability to fit non-linear additive models through splines but at a cost of more complexity.
+
+```{r bivarPlots, message=FALSE, warning=FALSE}
 # create a plot of each features against the target (count)
 dontPlot <- c('sector', 'x', 'y', 'bufoCalamita', 'count', 'sRich')
 plotFeatures <- setdiff(names(df), dontPlot)
 plotList <- lapply(plotFeatures, function(x, d) { 
-                     ggplot(d, aes(x=x, y="count")) + 
+                     ggplot(d, aes_string(x=x, y="count")) + 
                        geom_point() + 
-                       labs(x = x, y = "Count") +
+                       geom_smooth() +
+                       labs(x = x, y = "Road kill frog count") +
                        theme_minimal() }, df)
-
+marrangeGrob(plotList, nrow=3, ncol=3)
 ```
 
+```{r featuresToWorkWith, message=FALSE, warning=FALSE}
+nFeaturesDesired = 5
+```
+
+# Feature selection
+
+There are 17 features and 52 observations and given the non-linear nature suggested by the bi-variate plots it would be better to restrict the number of variables. Some alternatives are regularisation - lasso, ridge or glmnet, or feature selection. 
+
+Here, we are using a technique from predictive modelling and allowing the data to indicate which features are more important. A scientific model should be based on a theoretical model of the principles underlying the system being examined. Selection based on variable importance derived from random forests is the technique used. Due to sample size we would prefer 5 or less features. We take the top 1 $--$ `r nFeaturesDesired` as the basis for models. 
+
+```{r featureSelection, message=FALSE, warning=FALSE}
+library(ranger)
+library(purrr)
+library(mgcv)
+
+set.seed(1764)
+rf <- ranger(count ~ ., data = df %>% select(any_of(c(plotFeatures, 'count'))),
+             importance = "impurity", num.trees = 200)
+importOrder <- names(importance(rf) |> sort(decreasing = TRUE))
+form <- function(nfeatures, initStr = "", fnames, endStr = "") {
+  str_c(initStr, str_c("s(", fnames[1:nfeatures], ")", collapse = " + "), endStr) |>
+    formula()
+}
+```
+
+Now create a data frame with the formula and GAM based on the importance order, models only consider main effects. 
+
+```{r fitModels}
+fits <- tibble(nf = 1:nFeaturesDesired) %>% 
+  mutate(fitFormula = map(nf, form, initStr="count ~ ", fnames=importOrder)) %>% 
+  mutate(model = map(fitFormula, gam, family=poisson(), data=df)) 
+```
+
+# Feature selection
+
+Model selection based on the work in \cite{burnham2002model}. Here evidence ratios are used to select between models resulting in the "best" model being the one with 5 features, `r as.character(fits %>% filter(nf==5) %>% pull(fitFormula))`
+
+```{r modelSelection, results='asis'}
+fits <- fits %>% 
+  mutate(aic = map_dbl(model, AIC)) %>% 
+  mutate(aicDiff = aic - min(aic), 
+         likelihood = exp(-0.5*aicDiff),
+         weight = likelihood / sum(likelihood),
+         evidenceRatio = max(weight) / weight) 
+fits %>% 
+  arrange(evidenceRatio) %>% 
+  rename(n = nf) %>% 
+  mutate(formula = as.character(fitFormula)) %>% 
+  select(n, formula, aic, aicDiff, likelihood, weight, evidenceRatio) %>% 
+  knitr::kable(digits = 2)
+```
