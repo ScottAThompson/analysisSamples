@@ -1,0 +1,160 @@
+---
+title: "Heart Disease"
+author: "Scott Thompson"
+date: "18/04/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Purpose
+
+An example of a binary classification utilising data from the CDC Behavioural Risk Factor Surveillance System (including data from 2020) that has been cleaned by Kamil Pytlak. The exact treatments and the basis for feature exclusions are not documented but the data is sufficient to show different techniques and concepts in binary classification tasks. 
+
+# Analysis 
+
+```{r libraryLoad, echo=FALSE, message=FALSE, warning=FALSE}
+library(readr)
+library(here)
+library(dplyr)
+library(tidyr)
+library(tidyselect)
+library(stringr)
+library(rsample)
+library(purrr)
+library(yardstick)
+library(ggplot2)
+library(gridExtra)
+```
+
+Initial steps:
+
+* Load the data;
+* Ensures types are minimal;
+* Assess feature summaries; 
+* EDA plots - univariate and bi-variate; and
+* Summarise findings.
+
+```{r loadData, message=FALSE, warning=FALSE}
+# rd stands for raw data. Historically I used df (data frame) but that clashes
+genHealthMap = c("poor", "fair", "good", "very good", "excellent")
+ageCatMap = c("18-24", "25-29", "30-34", "35-39", "40-44", "45-49", "50-54", "55-59", "60-64", "65-69", "70-74", "75-79", "80 or older")
+
+clean <- function(rawData) { 
+  cleaned <- rawData %>% 
+    mutate(male = ifelse(Sex == "Male", 1L, 0L)) %>% 
+    mutate(across(.cols = c(Smoking, AlcoholDrinking, Stroke, DiffWalking, Asthma, PhysicalActivity, KidneyDisease, SkinCancer), .fns = ~ ifelse(.x == "Yes", 1, 0), .names = "{.col}_Dummy")) %>% 
+    rename_with(~ str_c(.x, "_Str"), c(Smoking, AlcoholDrinking, Stroke, DiffWalking, Asthma, PhysicalActivity, KidneyDisease, SkinCancer)) %>% 
+    mutate(Race = as.factor(Race),
+           health = ordered(GenHealth, levels = c("Poor", "Fair", "Good", "Very good", "Excellent")),
+           age = ordered(AgeCategory, levels = c("18-24", "25-29", "30-34", "35-39", "40-44", "45-49", "50-54", "55-59", "60-64", "65-69", "70-74", "75-79", "80 or older")),
+           # health = case_when(
+           #   str_to_lower(GenHealth) == "poor" ~ 1L,
+           #   str_to_lower(GenHealth) == "fair" ~ 2L,
+           #   str_to_lower(GenHealth) == "good" ~ 3L,
+           #   str_to_lower(GenHealth) == "very good" ~ 4L,
+           #   str_to_lower(GenHealth) == "excellent" ~ 5L,
+           #   TRUE ~ -1L),
+           # age = case_when(
+           #   str_to_lower(AgeCategory) == "18-24" ~ 1L,
+           #   str_to_lower(AgeCategory) == "25-29" ~ 2L,
+           #   str_to_lower(AgeCategory) == "30-34" ~ 3L,
+           #   str_to_lower(AgeCategory) == "35-39" ~ 4L,
+           #   str_to_lower(AgeCategory) == "40-44" ~ 5L,
+           #   str_to_lower(AgeCategory) == "45-49" ~ 6L,
+           #   str_to_lower(AgeCategory) == "50-54" ~ 7L,
+           #   str_to_lower(AgeCategory) == "55-59" ~ 8L,
+           #   str_to_lower(AgeCategory) == "60-64" ~ 9L,
+           #   str_to_lower(AgeCategory) == "65-69" ~ 10L,
+           #   str_to_lower(AgeCategory) == "70-74" ~ 11L,
+           #   str_to_lower(AgeCategory) == "75-79" ~ 12L,
+           #   str_to_lower(AgeCategory) == "80 or older" ~ 13L,
+           #   TRUE ~ -1L),
+           diabetes = case_when(
+             str_to_lower(Diabetic) == "yes" ~ 1L,
+             str_to_lower(Diabetic) == "no" ~ 0L,
+             str_to_lower(Diabetic) == "no, borderline diabetes" ~ 0L,
+             str_to_lower(Diabetic) == "yes (during pregnancy)" ~ 1L,
+             TRUE ~ -1L),
+           borderlineDiabetes = ifelse(str_to_lower(Diabetic) == "no, borderline diabetes", 1, 0),
+           pregnancyDiabetes = ifelse(str_to_lower(Diabetic) == "yes (during pregnancy)", 1, 0)) 
+
+  # assertthat::assert_that(all(rd$GenHealth > 0))
+  # assertthat::assert_that(all(rd$age > 0))
+  assertthat::assert_that(all(cleaned$diabetes >= 0))
+  return(cleaned)
+}
+
+rd <- read_csv(here("data/heart_2020_cleaned.csv")) 
+heart <- clean(rd)
+
+
+targetTable <- table(heart$HeartDisease)
+
+```
+## EDA Plots
+
+```{r splitData, message=FALSE, warning=FALSE}
+set.seed(1764)
+heart_split <- initial_split(heart, prop = 0.7, strata = HeartDisease)
+
+completeTrainingData <- training(heart_split) %>% 
+  select(-AgeCategory, -GenHealth, -Diabetic, -Sex, -ends_with("_Str")) %>% 
+  mutate(HeartDisease = as.factor(HeartDisease))
+nPositive = sum(completeTrainingData$HeartDisease == "Yes")
+
+# perform rebalancing of training data
+trainingData <- completeTrainingData %>% 
+  filter(HeartDisease == "Yes") %>% # positive cases
+  bind_rows( # negative cases
+    slice_sample(completeTrainingData %>% filter(HeartDisease == "No"), n = nPositive)) %>% 
+  slice_sample(n = nPositive * 2) # randomly order
+
+testData <- testing(heart_split) %>% 
+  select(-AgeCategory, -GenHealth, -Diabetic, -Sex, -ends_with("_Str")) %>% 
+  mutate(HeartDisease = as.factor(HeartDisease))
+```
+
+
+```{r bivarPlots, message=FALSE, warning=FALSE}
+# create a plot of each features against the target (count)
+plotFeatures <- c("BMI", "PhysicalHealth", "SleepTime")
+plotList <- lapply(plotFeatures, function(x, d) { 
+                     ggplot(d, aes_string(x=x, y="HeartDisease")) + 
+                       geom_boxplot() + 
+                       labs(x = x, y = "Heart Disease") +
+                       theme_minimal() }, trainingData)
+marrangeGrob(plotList, nrow=1, ncol=3)
+```
+
+```
+
+## EDA Findings
+
+There were `r nrow(rd)` observations and `r ncol(rd) - 1` features in the original data. After consideration the Diabetic category was considered to be 3 related features masked as 1, diabetes, borderlineDiabetes and pregnancyDiabetes. Many of the features were binary and recoded to dummy variables (marked as with _Dummy suffix). Likewise, Sex was in this data set binary and was recoded using a dummy variable male. Race was a factor with 6 levels and both GenHealth and AgeCategory were recoded to ordinals.
+
+The data are imbalanced with 27,373 positive cases and 292,422 negative cases. For evaluating the effectiveness of the predictive model, 30% of cases were not used during the modelling process - reserved for final evaluation of the model. Undersampling of the negative class was used to rebalance the classes; negative cases were selected at random and combined with the positive cases to give a data set with equal numbers of positive and negative cases. Cross-validation (5 fold) was used to provide evaluation on the model for future comparison with alternate models. 
+
+A logistic regression model was fit to each fold and Area Under the Curve calculated against the validation set. The average result was approximately 0.16 - a dismal score suggesting more work is required.
+
+```{r sampling}
+cv_splits <- vfold_cv(trainingData, v = 5)
+cvData <- cv_splits %>% 
+  mutate(train = map(splits, ~training(.x)),
+         validate = map(splits, ~testing(.x)))
+
+cvLogReg <- cvData %>% 
+  mutate(logReg = map(train, ~ glm(HeartDisease ~ ., data = .x, family = "binomial")))
+
+# heartDT <- heart %>% 
+#   select(-age, -health, -diabetes, -borderlineDiabetes, -pregnancyDiabetes, -male, -ends_with("_Dummy"))
+
+cvLogReg <- cvLogReg %>% 
+  mutate(actuals = map(validate, ~.x$HeartDisease),
+         predictions = map2(logReg, validate, 
+                            ~predict(.x, newdata = .y, type="response"))) %>% 
+  mutate(auc = map2_dbl(actuals, predictions, ~roc_auc_vec(truth = .x, estimate = .y)))
+```
+
